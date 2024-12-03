@@ -1,0 +1,164 @@
+
+trigger:
+- master  
+- 'release/**'
+pr: none
+
+#checkout multiple repositories in the pipeline
+resources:
+  repositories:
+  - repository: azureSharedTemplates
+    type: github
+    endpoint: ACREnterprise-NRDR 2.0
+    name: ACREnterprise/ADOCS-templates
+    branch: master
+
+variables:
+  projectPath : '**/ACR.DIR.DatabaseMigrations.DbContexts.csproj'
+
+extends:
+  template: shared-template.yml@azureSharedTemplates #Refer to the resources section repo 1)
+  # Below are parameters needed for shared template
+  parameters:
+    #parameters to set build version
+    buildVersionMajor: 1
+    buildVersionMinor: 0
+    buildPoolImage: 'ubuntu-latest'
+    
+    
+    #Required
+    #Provide tasks which will be executed for build process
+    #Below is an example of tasks for .net Core project
+    buildSteps:
+      - checkout: self      
+        fetchDepth: 0
+
+      - task: UseDotNet@2
+        inputs:
+          packageType: 'sdk'
+          version: '8.0.x' 
+      - task: NuGetToolInstaller@0
+        displayName: 'Use NuGet 6.x'
+        inputs:
+          versionSpec: 6.x
+      
+      - task: DotNetCoreCLI@2
+        displayName: Install Entity Framework Core CLI
+        inputs:
+          command: 'custom'
+          custom: 'tool'
+          arguments: 'update --global dotnet-ef --version 8.0.7 --ignore-failed-sources'
+
+      - task: DotNetCoreCLI@2
+        displayName: 'Restore NuGet Packages'
+        inputs:
+          command: 'restore'
+          projects: 'ACR.DIR.DatabaseMigrations.sln'
+          feedsToUse: 'config'
+          nugetConfigPath: 'nuget.config'
+          externalFeedCredentials: 'ACR Nuget All Host with Credential-NRDR 2.0'
+    
+     
+      #Build
+
+      - task: DotNetCoreCLI@2
+        displayName: Build the .NET Core project
+        inputs:
+          command: 'build'
+          arguments: '--configuration Release --no-restore'
+          projects: 'ACR.DIR.DatabaseMigrations.DbContexts/ACR.DIR.DatabaseMigrations.DbContexts.csproj'
+          
+          
+      #Run Unit Tests
+
+      # - task: DotNetCoreCLI@2
+      #   displayName: 'Run Unit Tests'
+      #   continueOnError: true
+      #   inputs:
+      #    command: 'test'
+      #    arguments: '--no-restore'
+      #    projects: 'dir-databasemigrations/ACR.DIR.DatabaseMigrations.Test/ACR.DIR.DatabaseMigrations.Tests.csproj' 
+      #    publishTestResults: true
+         
+         
+      #Bundle-Migration 
+      - task: DotNetCoreCLI@2
+        displayName: Bundle-Migration for DirContext
+        inputs:
+          command: 'custom'
+          custom: 'ef'
+          arguments: 'migrations bundle --context DirContext --project ACR.DIR.DatabaseMigrations.DbContexts/ACR.DIR.DatabaseMigrations.DbContexts.csproj --self-contained --target-runtime win-x64 --output $(Build.ArtifactStagingDirectory)/NugetPackage/Update-DbsDatabase.exe --verbose'
+
+      #Publish Artifacts to Pipeline
+      
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: '$(Build.ArtifactStagingDirectory)/NugetPackage'
+          artifact: 'ACR.DIR.DatabaseMigrations.DbContexts'
+          publishLocation: 'pipeline'
+      - task: NuGetToolInstaller@1
+        inputs:
+          versionSpec: '6.1.0'
+      
+      
+       #Create nuspec file 
+      - task: CmdLine@2
+        displayName: 'Grant Permission to NuGet spec'
+        inputs:
+          script: 'chmod -R a+x /opt/hostedtoolcache/NuGet/'
+      
+      - task: CmdLine@2
+        displayName: Create NuGet spec file .nuspec
+        inputs:
+           script: 'nuget.exe spec ACR.DIR.DatabaseMigrations.EfBundle'
+           workingDirectory: '$(Build.ArtifactStagingDirectory)/NugetPackage'
+      
+      
+      #Create Package
+
+      - task: NuGetCommand@2
+        displayName: Pack NuGet package
+        inputs:
+          command: 'pack'
+          packagesToPack: '$(Build.ArtifactStagingDirectory)/NugetPackage/*.nuspec'
+          packDestination: '$(Build.SourcesDirectory)/nupkg'
+          versioningScheme: 'byEnvVar'
+          versionEnvVar: 'BUILD_BUILDNUMBER'
+      
+      
+      #Push Package
+
+      - task: NuGetCommand@2
+        inputs:
+           command: 'push'
+           packagesToPush: '$(Build.SourcesDirectory)/nupkg/*.nupkg;!$(Build.SourcesDirectory)/nupkg/**/*.symbols.nupkg'
+           nuGetFeedType: 'external'
+           publishFeedCredentials: 'ACR Nexus Nuget Host with API Key-NRDR 2.0'
+           
+      - task: ArchiveFiles@2
+        displayName: Create ZIP archive for build output
+        inputs:
+          rootFolderOrFile: '$(Build.ArtifactStagingDirectory)'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/DatabaseMigrations.$(Build.BuildNumber).zip' # Give ZIP file name appended with build number
+          replaceExistingArchive: true
+      - publish: $(Build.ArtifactStagingDirectory)/DatabaseMigrations.$(Build.BuildNumber).zip
+        artifact: DatabaseMigrations-zip 
+
+      #Run Checkmarx and IQ scan
+
+    securityScanAgentPool: 'Local Agents'
+    runCheckMarxScan: true
+    CheckmarxServiceConnection: 'ACR Checkmarx-NRDR 2.0'
+    CheckmarxProject: 'ACR.DIR.DataMigrations'
+    CheckmarxCustomPreset: 'ACR Default'
+    CheckmarxFullTeamName: 'CxServer\SOC\ACR\All\Dev\NRDR20'
+    CheckmarxFolderExclusion: 'cvs, .svn, .hg , .git, .bzr, bin , obj,  backup, .idea, node_modules'
+    runIQScan: true
+    NexusServiceConnection: 'ACR Nexus IQ-NRDR 2.0'
+    NexusAppId: 'dir_database_migration'
+    NexusScanStage: 'Build'
+    ArtifactsForNexusScan: '' 
+    NexusScanTarget: '$(Build.SourcesDirectory)/Nexus/**/**.zip'
+ 
